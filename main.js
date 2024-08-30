@@ -1,3 +1,4 @@
+// main.js or your main Electron file
 const { app, BrowserWindow, Notification } = require('electron');
 const path = require('path');
 const http = require('http');
@@ -5,6 +6,8 @@ const express = require('express');
 const socketIO = require('socket.io');
 const fs = require('fs');
 const admin = require('firebase-admin');
+const audio = require('node-web-audio-api');
+const audioContext = new audio.AudioContext();
 
 // Firebase Admin SDK setup
 const serviceAccount = require('./guardian-gesture-firebase-adminsdk-vc1w6-266d1d9c74.json');
@@ -32,6 +35,33 @@ expressApp.set('views', path.join(__dirname, 'views'));
 function showNotification(title, body) {
   new Notification({ title, body }).show();
 }
+
+function playEmergencySound() {
+  const soundFile = path.join(__dirname, 'sounds', 'emergency-sound.mp3');
+  
+  // Read the file and convert it to an ArrayBuffer
+  fs.readFile(soundFile, (err, data) => {
+    if (err) {
+      console.error('Error reading sound file:', err);
+      return;
+    }
+    
+    // Convert Node.js Buffer to ArrayBuffer
+    const arrayBuffer = Uint8Array.from(data).buffer;
+
+    // Decode the ArrayBuffer
+    audioContext.decodeAudioData(arrayBuffer, (buffer) => {
+      const source = audioContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioContext.destination);
+      source.start(0);
+    }, (error) => {
+      console.error('Error decoding audio data:', error);
+    });
+  });
+}
+
+
 function downloadImagesFromFirebase() {
   bucket.getFiles({ prefix: 'images/' }, (err, files) => {
     if (err) {
@@ -53,6 +83,9 @@ function downloadImagesFromFirebase() {
             
             // Show the notification here
             showNotification("Emergency Detected", `Image ${path.basename(file.name)} has been downloaded.`);
+            
+            // Play the emergency sound
+            playEmergencySound();
           });
         }
       }
@@ -86,7 +119,7 @@ expressApp.get('/image/:filename', (req, res) => {
   res.sendFile(filePath);
 });
 
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.PORT || 3003;
 server.listen(PORT, () => {
   console.log(`Backend server running on port ${PORT}`);
 });
@@ -119,47 +152,47 @@ app.on('window-all-closed', () => {
     app.quit();
   }
 });
+
 let storefilename = new Set();
 io.on('connection', (socket) => {
-    console.log('A client connected');
-    
-    fs.readdir(localFolder, (err, files) => {
-        if (err) {
-            console.error('Error reading the local folder:', err);
-            return;
-        }
+  console.log('A client connected');
 
-        // Assuming 'files' is an array of filenames
-const imageFiles = files
-.filter(file => file.endsWith('.jpg'))
-.slice(-10); // Get the last 10 files
+  fs.readdir(localFolder, (err, files) => {
+    if (err) {
+      console.error('Error reading the local folder:', err);
+      return;
+    }
 
-// Extract hour and minute from the filename
-const extractTime = filename => {
-const timeString = filename.slice(-10, -4); // Get the last 6 digits before '.jpg'
-const hour = parseInt(timeString.slice(0, 2));
-const minute = parseInt(timeString.slice(2, 4));
-return { hour, minute };
-};
+    const imageFiles = files
+      .filter(file => file.endsWith('.jpg'))
+      .slice(-10); // Get the last 10 files
 
-// Get the time of the last file
-const lastFileTime = extractTime(imageFiles[imageFiles.length - 1]);
+    // Extract hour and minute from the filename
+    const extractTime = filename => {
+      const timeString = filename.slice(-10, -4); // Get the last 6 digits before '.jpg'
+      const hour = parseInt(timeString.slice(0, 2));
+      const minute = parseInt(timeString.slice(2, 4));
+      return { hour, minute };
+    };
 
-// Filter files within a 2-minute range from the last file
-const filteredFiles = imageFiles.filter(file => {
-const { hour, minute } = extractTime(file);
-const timeDifference = (lastFileTime.hour * 60 + lastFileTime.minute) - (hour * 60 + minute);
-return timeDifference >= 0 && timeDifference <= 2;
-});
+    // Get the time of the last file
+    const lastFileTime = extractTime(imageFiles[imageFiles.length - 1]);
 
-filteredFiles.forEach(file => {
-  if (!storefilename.has(file)) { // Check if the file has not been emitted
-    socket.emit('new_image', { filename: file });
-    storefilename.add(file); // Add the file to the Set after emitting
-  }
-});
-
+    // Filter files within a 2-minute range from the last file
+    const filteredFiles = imageFiles.filter(file => {
+      const { hour, minute } = extractTime(file);
+      const timeDifference = (lastFileTime.hour * 60 + lastFileTime.minute) - (hour * 60 + minute);
+      return timeDifference >= 0 && timeDifference <= 2;
     });
 
-    socket.emit('location_data', { latitude: '12.9716', longitude: '77.5946' });
+    filteredFiles.forEach(file => {
+      if (!storefilename.has(file)) { // Check if the file has not been emitted
+        socket.emit('new_image', { filename: file });
+        storefilename.add(file); // Add the file to the Set after emitting
+      }
+    });
+
+  });
+
+  socket.emit('location_data', { latitude: '12.9716', longitude: '77.5946' });
 });
