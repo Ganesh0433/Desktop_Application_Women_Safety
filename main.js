@@ -1,5 +1,4 @@
-// main.js or your main Electron file
-const { app, BrowserWindow, Notification } = require('electron');
+const { app, BrowserWindow, Notification, Tray, Menu } = require('electron');
 const path = require('path');
 const http = require('http');
 const express = require('express');
@@ -32,24 +31,25 @@ const io = socketIO(server);
 expressApp.set('view engine', 'ejs');
 expressApp.set('views', path.join(__dirname, 'views'));
 
-function showNotification(title, body) {
-  new Notification({ title, body }).show();
+let mainWindow;
+let tray;
+let isQuiting = false;
+
+function showNotification(title) {
+  new Notification({ title}).show();
 }
 
 function playEmergencySound() {
   const soundFile = path.join(__dirname, 'sounds', 'emergency-sound.mp3');
-  
-  // Read the file and convert it to an ArrayBuffer
+
   fs.readFile(soundFile, (err, data) => {
     if (err) {
       console.error('Error reading sound file:', err);
       return;
     }
-    
-    // Convert Node.js Buffer to ArrayBuffer
+
     const arrayBuffer = Uint8Array.from(data).buffer;
 
-    // Decode the ArrayBuffer
     audioContext.decodeAudioData(arrayBuffer, (buffer) => {
       const source = audioContext.createBufferSource();
       source.buffer = buffer;
@@ -60,7 +60,6 @@ function playEmergencySound() {
     });
   });
 }
-
 
 function downloadImagesFromFirebase() {
   bucket.getFiles({ prefix: 'images/' }, (err, files) => {
@@ -80,10 +79,10 @@ function downloadImagesFromFirebase() {
             }
             console.log(`Downloaded ${localPath}`);
             io.emit('new_image', { filename: path.basename(file.name) });
-            
-            // Show the notification here
-            showNotification("Emergency Detected", `Image ${path.basename(file.name)} has been downloaded.`);
-            
+
+            // Show the notification
+            showNotification("Emergency Detected ...");
+
             // Play the emergency sound
             playEmergencySound();
           });
@@ -119,13 +118,13 @@ expressApp.get('/image/:filename', (req, res) => {
   res.sendFile(filePath);
 });
 
-const PORT = process.env.PORT || 3003;
+const PORT = process.env.PORT || 3004;
 server.listen(PORT, () => {
   console.log(`Backend server running on port ${PORT}`);
 });
 
 function createWindow() {
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 800,
     height: 600,
     webPreferences: {
@@ -136,10 +135,48 @@ function createWindow() {
   });
 
   mainWindow.loadURL(`http://localhost:${PORT}`);
+
+  mainWindow.on('minimize', function (event) {
+    event.preventDefault();
+    mainWindow.hide();
+  });
+
+  mainWindow.on('close', function (event) {
+    if (!isQuiting) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
+    return false;
+  });
 }
 
 app.whenReady().then(() => {
   createWindow();
+
+  tray = new Tray(path.join(__dirname, 'icon.png'));
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Show App',
+      click: () => {
+        mainWindow.show();
+      }
+    },
+    {
+      label: 'Quit',
+      click: () => {
+        isQuiting = true;
+        app.quit();
+      }
+    }
+  ]);
+
+  tray.setToolTip('Guardian Gesture');
+  tray.setContextMenu(contextMenu);
+
+  tray.on('click', () => {
+    mainWindow.show();
+  });
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -163,22 +200,17 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const imageFiles = files
-      .filter(file => file.endsWith('.jpg'))
-      .slice(-10); // Get the last 10 files
+    const imageFiles = files ? files.filter(file => file.endsWith('.jpg')).slice(-10) : [];
 
-    // Extract hour and minute from the filename
     const extractTime = filename => {
-      const timeString = filename.slice(-10, -4); // Get the last 6 digits before '.jpg'
-      const hour = parseInt(timeString.slice(0, 2));
-      const minute = parseInt(timeString.slice(2, 4));
+      const timeString = filename ? filename.slice(-10, -4) : [];
+      const hour = timeString ? parseInt(timeString.slice(0, 2)) : [];
+      const minute = timeString ? parseInt(timeString.slice(2, 4)) : [];
       return { hour, minute };
     };
 
-    // Get the time of the last file
     const lastFileTime = extractTime(imageFiles[imageFiles.length - 1]);
 
-    // Filter files within a 2-minute range from the last file
     const filteredFiles = imageFiles.filter(file => {
       const { hour, minute } = extractTime(file);
       const timeDifference = (lastFileTime.hour * 60 + lastFileTime.minute) - (hour * 60 + minute);
@@ -186,13 +218,39 @@ io.on('connection', (socket) => {
     });
 
     filteredFiles.forEach(file => {
-      if (!storefilename.has(file)) { // Check if the file has not been emitted
+      if (!storefilename.has(file)) {
         socket.emit('new_image', { filename: file });
-        storefilename.add(file); // Add the file to the Set after emitting
+        storefilename.add(file);
       }
     });
 
   });
 
-  socket.emit('location_data', { latitude: '12.9716', longitude: '77.5946' });
+  const fetchLocation = async () => {
+    let data = null;
+
+    try {
+      const res = await fetch(`https://guardian-gesture-default-rtdb.firebaseio.com/location.json`);
+
+      if (res.ok) {
+        data = await res.json();
+
+        if (data && data['latitude'] && data['longitude']) {
+          socket.emit('location_data', { latitude: data['latitude'], longitude: data['longitude'] });
+        } else {
+          console.error('Latitude or Longitude data is missing.');
+        }
+
+      } else {
+        throw new Error('Failed to fetch data.');
+      }
+
+    } catch (error) {
+      console.error('Error:', error);
+    }
+  }
+  fetchLocation();
+  setInterval(() => {
+    fetchLocation();
+  }, 5000);
 });
